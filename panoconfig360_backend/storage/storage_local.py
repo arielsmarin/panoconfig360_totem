@@ -61,3 +61,4 @@ def get_json(key: str) -> dict:
     except Exception as e:
         logging.error(f"❌ Failed to read JSON {key}: {e}")
         raise
+    return data

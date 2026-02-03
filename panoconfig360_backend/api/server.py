@@ -11,16 +11,16 @@ from fastapi import FastAPI, HTTPException, Request, Body
 from panoconfig360_backend.render.dynamic_stack import load_config, stack_layers
 from panoconfig360_backend.render.split_faces_cubemap import process_cubemap
 from panoconfig360_backend.render.stack_2d import render_stack_2d
-from panoconfig360_backend.render.resolve_2d_assets import resolve_2d_base, resolve_2d_overlay
 from panoconfig360_backend.models.render_2d import Render2DRequest
 from panoconfig360_backend.storage.storage_local import exists, upload_file
+from panoconfig360_backend.render.scene_context import resolve_scene_context
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 
 # CONFIGURAÇÕES GLOBAIS
 ROOT_DIR = Path(__file__).resolve().parents[1].parent
-CONFIG_URL = ROOT_DIR / "panoconfig360_frontend/pano/config.json"
+CLIENTS_ROOT = Path("panoconfig360_backend/assets/clients")
 LOCAL_CACHE_DIR = ROOT_DIR / "panoconfig360_cache"
 FRONTEND_DIR = ROOT_DIR / "panoconfig360_frontend"
 os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
@@ -28,6 +28,23 @@ project, layers = None, None
 tile_pattern = "{BUILD}_{FACE}_{LOD}_{X}_{Y}.jpg"
 
 
+# Carrega configuração do cliente padrão
+def load_client_config(client_id: str):
+    config_path = CLIENTS_ROOT / client_id / "config.json"
+
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Configuração do cliente '{client_id}' não encontrada em {config_path}.")
+
+    project, scenes, naming = load_config(config_path)
+
+    project["scenes"] = scenes
+    project["client_id"] = client_id
+
+    return project, naming
+
+
+# Carrega configuração do cliente padrão
 def get_tile_key(build, face, lod, x, y):
     tile_root = project.get(
         "tileRoot", "cubemap/tiles").rstrip("/")
@@ -48,31 +65,18 @@ MIN_INTERVAL = 1.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global project, layers, tile_pattern
+    logging.info("🚀 Iniciando backend Panoconfig360")
 
-    try:
-        logging.info(f"Carregando configuração do projeto de {CONFIG_URL}...")
-        project, layers, naming = load_config(CONFIG_URL)
+    os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
 
-        tile_pattern = (
-            naming.get("tilePattern")
-            or project.get("naming", {}).get("tilePattern", tile_pattern)
-            if naming or project else tile_pattern
-        )
-
-        logging.info(
-            f"✅ Configuração carregada: {len(layers) if layers is not None else 0} camadas detectadas."
-        )
-        logging.info(f"🎨 Padrão de tiles ativo: {tile_pattern}")
-
-    except Exception:
-        logging.exception("❌ Falha ao carregar configuração do CDN:")
-        project, layers = None, None
-        tile_pattern = "{BUILD}_{FACE}_{LOD}_{X}_{Y}.jpg"
+    # apenas default
+    global tile_pattern
+    tile_pattern = "{BUILD}_{FACE}_{LOD}_{X}_{Y}.jpg"
 
     yield
 
-    logging.info("🧹 Encerrando aplicação — limpando recursos se necessário.")
+    logging.info("🧹 Encerrando aplicação")
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -100,12 +104,17 @@ app.mount(
 )
 
 
-@app.post("/api/render")
-def render_cubemap(payload: dict = Body(...), request: Request = None):
+@app.post("/api/render", response_model=None)
+def render_cubemap(
+    payload: dict = Body(...),
+    request: Request = None
+):
     origin = request.headers.get("origin") if request else None
     logging.info(f"🌐 Requisição recebida de origem: {origin}")
 
-    # ⏱️ RATE LIMIT
+    # ======================================================
+    # ⏱️ RATE LIMIT (GLOBAL)
+    # ======================================================
     now = time.monotonic()
     with lock:
         global last_request_time
@@ -116,58 +125,99 @@ def render_cubemap(payload: dict = Body(...), request: Request = None):
             )
         last_request_time = now
 
-    # ✅ VALIDAÇÕES INICIAIS
-    if project is None or layers is None:
-        raise HTTPException(
-            status_code=500, detail="Configuração do projeto não carregada")
-
-    build = payload.get("build")
+    # ======================================================
+    # ✅ VALIDAÇÕES INICIAIS DO PAYLOAD
+    # ======================================================
+    client_id = payload.get("client")
+    scene_id = payload.get("scene")
     selection = payload.get("selection")
 
-    if not build or not selection:
-        raise HTTPException(
-            status_code=400, detail="build ou selection ausente")
+    if not client_id:
+        raise HTTPException(400, "client ausente no payload")
 
-    # 🔍 VERIFICAÇÃO DE CACHE NO R2 (ANTES DE QUALQUER PROCESSAMENTO)
-    tile_root = project.get("tileRoot", "cubemap/tiles").rstrip("/")
-    metadata_key = f"{tile_root}/{build}.json"
+    if not scene_id:
+        raise HTTPException(400, "scene ausente no payload")
 
-    logging.info(f"🔍 Verificando cache no R2: {metadata_key}")
+    if not selection or not isinstance(selection, dict):
+        raise HTTPException(400, "selection ausente ou inválida")
+
+    # ======================================================
+    # 📦 CARREGA CONFIG DO CLIENTE
+    # ======================================================
+    try:
+        project, _ = load_client_config(client_id)
+        project["client_id"] = client_id
+
+    except Exception as e:
+        logging.exception("❌ Falha ao carregar config do cliente")
+        raise HTTPException(500, f"Erro ao carregar config do cliente: {e}")
+
+    # ======================================================
+    # 🎬 RESOLVE CONTEXTO DA CENA
+    # ======================================================
+    try:
+        ctx = resolve_scene_context(project, scene_id)
+    except Exception as e:
+        logging.exception("❌ Cena inválida")
+        raise HTTPException(400, f"Cena inválida: {e}")
+
+    scene_layers = ctx["layers"]
+    assets_root = ctx["assets_root"]
+    scene_index = ctx["scene_index"]
+
+    # ======================================================
+    # 🧮 GERA BUILD STRING REAL (COM CENA)
+    # ======================================================
+    stack_img, build_body = stack_layers(
+        scene_id=scene_id,
+        layers=scene_layers,
+        selection=selection,
+        assets_root=assets_root,
+    )
+
+    scene_prefix = format(scene_index, "02x")
+    build_str = scene_prefix + build_body
+
+    # ======================================================
+    # 🔍 VERIFICAÇÃO DE CACHE (COM BUILD CORRETO)
+    # ======================================================
+    tile_root = f"cubemap/{client_id}/{scene_id}/tiles/{build_str}"
+    metadata_key = f"{tile_root}/metadata.json"
+
+    logging.info(f"🔍 Verificando cache local: {metadata_key}")
 
     if exists(metadata_key):
-        logging.info(f"✅ Build {build} encontrado no R2. Retornando cache.")
+        logging.info(f"✅ Build {build_str} já existe no cache.")
         return {
             "status": "cached",
-            "build": build,
+            "build": build_str,
             "tileRoot": tile_root,
-            "message": "Tiles já existem no CDN, consumir diretamente."
+            "message": "Tiles já existem no cache, consumir diretamente."
         }
 
-    logging.info(f"🆕 Build {build} não existe no R2. Iniciando geração...")
-
-    # 🏗️ PROCESSAMENTO (SOMENTE SE NÃO EXISTIR NO CACHE)
+    # ======================================================
+    # 🏗️ PROCESSAMENTO
+    # ======================================================
     start = time.monotonic()
-    tmp_dir = tempfile.mkdtemp(prefix=f"{build}_")
+    tmp_dir = tempfile.mkdtemp(prefix=f"{build_str}_")
     logging.info(f"📁 Diretório temporário criado: {tmp_dir}")
 
     try:
-        # 1️⃣ Empilha camadas (gera imagem combinada em memória)
-        logging.info("🖼️ Gerando stack de camadas...")
-        stack_img, build_str = stack_layers(project, layers, selection)
-        if not build_str:
-            build_str = str(build)
+        logging.info("🧩 Gerando tiles do cubemap...")
+        process_cubemap(
+            stack_img,
+            tmp_dir,
+            tile_size=512,
+            level=0,
+            build=build_str
+        )
 
-        # 2️⃣ Gera tiles do cubemap (salva temporariamente em disco)
-        logging.info("🧩 Dividindo cubemap em tiles...")
-        process_cubemap(stack_img, tmp_dir, tile_size=512,
-                        level=0, build=build_str)
-
-        # 3️⃣ Libera memória da imagem após gerar tiles
         del stack_img
-        logging.info("🧹 Memória da imagem liberada.")
+        logging.info("🧹 Memória do stack liberada.")
 
-        # 4️⃣ Faz upload de cada tile para o cache local
-        logging.info("📤 Iniciando upload dos tiles para o cache local...")
+        # ==================================================
+        # 📤 UPLOAD DOS TILES
+        # ==================================================
         uploaded_count = 0
 
         for filename in os.listdir(tmp_dir):
@@ -177,125 +227,132 @@ def render_cubemap(payload: dict = Body(...), request: Request = None):
             file_path = os.path.join(tmp_dir, filename)
             key = f"{tile_root}/{filename}"
 
-            try:
-                upload_file(file_path, key, "image/jpeg")
-                uploaded_count += 1
-                logging.info(f"📤 Upload concluído: {key}")
-            except Exception:
-                logging.exception(f"❌ Falha ao fazer upload: {filename}")
+            upload_file(file_path, key, "image/jpeg")
+            uploaded_count += 1
 
         logging.info(f"📤 {uploaded_count} tiles enviados para o cache local.")
 
-        # 5️⃣ Publica metadados SOMENTE se pelo menos 1 tile foi enviado
+        # ==================================================
+        # 🧾 METADATA
+        # ==================================================
         if uploaded_count > 0:
             meta = {
+                "client": client_id,
+                "scene": scene_id,
                 "build": build_str,
                 "tileRoot": tile_root,
                 "tiles_count": uploaded_count,
                 "generated_at": int(time.time()),
                 "status": "ready",
             }
+
             meta_path = os.path.join(tmp_dir, f"{build_str}.json")
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f)
 
-            with open(meta_path, "w", encoding="utf-8") as meta_file:
-                json.dump(meta, meta_file)
-
-            try:
-                upload_file(meta_path, metadata_key, "application/json")
-                logging.info(f"📤 Upload de metadata concluído: {metadata_key}")
-            except Exception:
-                logging.exception(
-                    f"Falha ao fazer upload dos metadados {meta_path} -> {metadata_key}"
-                )
-        else:
-            logging.warning(
-                f"⚠️ Nenhum tile enviado para build={build_str}; não publicando metadata."
-            )
+            upload_file(meta_path, metadata_key, "application/json")
 
         elapsed = time.monotonic() - start
-        logging.info(
-            f"✅ Render completo em {elapsed:.2f}s — Build: {build_str}")
+        logging.info(f"✅ Render concluído em {elapsed:.2f}s")
 
         return {
             "status": "generated",
+            "client": client_id,
+            "scene": scene_id,
             "build": build_str,
             "tileRoot": tile_root,
             "tiles_count": uploaded_count,
             "elapsed_seconds": round(elapsed, 2),
-            "message": "Tiles gerados e enviados para o CDN." if uploaded_count > 0
-            else "Processo concluído sem tiles — verifique entradas."
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logging.exception("❌ Erro inesperado durante o processamento:")
-        raise HTTPException(
-            status_code=500, detail=f"Erro interno ao processar render: {str(e)}")
+        logging.exception("❌ Erro durante render")
+        raise HTTPException(500, f"Erro interno ao processar render: {e}")
 
     finally:
-        # 6️⃣ LIMPEZA: Remove diretório temporário (libera disco)
-        try:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            logging.info(f"🧹 Diretório temporário removido: {tmp_dir}")
-        except Exception:
-            logging.exception(f"⚠️ Falha ao remover: {tmp_dir}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logging.info(f"🧹 Diretório temporário removido: {tmp_dir}")
 
 
 @app.post("/api/render2d")
 def render_2d(payload: Render2DRequest):
-    build = payload.buildString
-    selection = payload.selection
+    client_id = payload.client
+    scene_id = payload.scene
+    selection = payload.selection  # mantido por simetria
+    build_string = payload.buildString  # JÁ EXISTE, NÃO RECALCULA
 
-    cdn_key = f"renders/2d/{build}.jpg"
+    cdn_key = f"renders/2d_{build_string}.jpg"
 
-    # cache-first
     if exists(cdn_key):
-        print(f"✅ Imagem 2D para build {build} encontrada no cache.")
         return {
             "status": "cached",
-            "url": f"{os.getenv('CDN_BASE')}/{cdn_key}"
+            "client": client_id,
+            "scene": scene_id,
+            "build": build_string,
+            "url": f"/panoconfig360_cache/{cdn_key}"
         }
-    base_path = resolve_2d_base()
+
+    # resolve config do cliente
+    project, _ = load_client_config(client_id)
+    project["client_id"] = client_id
+
+    # resolve cena (MESMA lógica do cubemap)
+    ctx = resolve_scene_context(project, scene_id)
+    assets_root = ctx["assets_root"]
+    layers = ctx["layers"]
+
+    # base 2D (MESMO caminho do cubemap, só muda o prefixo)
+    base_path = assets_root / f"2d_base_{scene_id}.jpg"
+    if not base_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Base 2D não encontrada: {base_path}"
+        )
 
     ordered_layers = sorted(layers, key=lambda l: l.get("build_order", 0))
     overlays = []
 
-
     for layer in ordered_layers:
         layer_id = layer["id"]
+
+        # item escolhido para essa layer (MESMA lógica do cubemap)
         item_id = selection.get(layer_id)
 
+        # se for null, ignora (ex: baccarat)
         if not item_id:
             continue
 
-        # acha o item no config
-        item_def = next(
-            (i for i in layer.get("items", []) if i["id"] == item_id),
-            None
+        overlay_path = (
+            assets_root
+            / "layers"
+            / layer_id
+            / f"2d_{layer_id}_{item_id}.png"
         )
 
-        # 🔑 regra oficial do config.json
-        if not item_def or item_def.get("file") is None:
-            continue
+        if not overlay_path.exists():
+            continue  # overlay opcional, igual cubemap
 
-        overlays.append({
-            "path": resolve_2d_overlay(layer_id, item_def["file"])
-        })
+        overlays.append({"path": str(overlay_path)})
 
-    output = "/tmp/render_2d.jpg"
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        output = tmp.name
 
     render_stack_2d(
-        base_image_path=base_path,
+        base_image_path=str(base_path),
         layers=overlays,
         output_path=output
     )
 
+    # 🔑 OUTPUT IGUAL AO CUBEMAP (prefixo 2d_)
     upload_file(output, cdn_key, "image/jpeg")
+    os.remove(output)
 
     return {
         "status": "generated",
-        "url": f"{os.getenv('CDN_BASE')}/{cdn_key}"
+        "client": client_id,
+        "scene": scene_id,
+        "build": build_string,
+        "url": f"/panoconfig360_cache/{cdn_key}"
     }
 
 
