@@ -65,7 +65,7 @@ MIN_INTERVAL = 1.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.info("🚀 Iniciando backend Panoconfig360")
+    logging.info("🚀 Iniciando backend STRATY")
 
     os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
 
@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logging.info("🧹 Encerrando aplicação")
+    logging.info("🧹 Encerrando backend STRATY")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -284,6 +284,7 @@ def render_2d(payload: Render2DRequest):
     cdn_key = f"renders/2d_{build_string}.jpg"
 
     if exists(cdn_key):
+        logging.info(f"✅ Render 2D já existe no cache: {cdn_key}")
         return {
             "status": "cached",
             "client": client_id,
