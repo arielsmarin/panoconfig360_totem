@@ -6,6 +6,24 @@ from PIL import Image
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+# ======================================================
+# 🔧 CONSTANTES
+# ======================================================
+CONFIG_STRING_BASE = 36
+FIXED_LAYERS = 13
+
+
+def get_build_chars() -> int:
+    if CONFIG_STRING_BASE == 16:
+        return 2
+    elif CONFIG_STRING_BASE == 336:
+        return 3
+    return 2
+
+
+def get_actual_base() -> int:
+    return 36 if CONFIG_STRING_BASE == 336 else CONFIG_STRING_BASE
+
 
 # ======================================================
 # 📦 CONFIG LOADER
@@ -26,7 +44,6 @@ def load_config(config_path):
 
     scenes = config.get("scenes")
 
-    # fallback v1 (single scene)
     if not scenes:
         scenes = {
             "default": {
@@ -41,68 +58,93 @@ def load_config(config_path):
 
 
 # ======================================================
-# 🔢 BUILD STRING
+# 🔢 ENCODE / DECODE
 # ======================================================
 
 def base36_encode(num: int, width: int = 2) -> str:
     chars = "0123456789abcdefghijklmnopqrstuvwxyz"
     result = ""
-    while num:
-        num, i = divmod(num, 36)
+    n = num
+    while n:
+        n, i = divmod(n, 36)
         result = chars[i] + result
     return (result or "0").zfill(width)
 
 
-def build_string_from_selection(layers, selection, base=36, chars=2):
-    result = []
+def base36_decode(s: str) -> int:
+    return int(s.lower(), 36)
 
-    for layer in sorted(layers, key=lambda x: x.get("build_order", 0)):
+
+def hex_encode(num: int, width: int = 2) -> str:
+    return format(num, f"0{width}x")
+
+
+def hex_decode(s: str) -> int:
+    return int(s, 16)
+
+
+def encode_index(index: int) -> str:
+    chars = get_build_chars()
+    base = get_actual_base()
+    if base == 16:
+        return hex_encode(index, chars)
+    return base36_encode(index, chars)
+
+
+def decode_index(s: str) -> int:
+    base = get_actual_base()
+    if base == 16:
+        return hex_decode(s)
+    return base36_decode(s)
+
+
+# ======================================================
+# 🔢 BUILD STRING
+# ======================================================
+
+def build_string_from_selection(layers: list, selection: dict) -> str:
+    config = [encode_index(0)] * FIXED_LAYERS
+
+    for layer in layers:
+        build_order = layer.get("build_order", 0)
+        
+        if build_order < 0 or build_order >= FIXED_LAYERS:
+            continue
+
         layer_id = layer["id"]
         selected_id = selection.get(layer_id)
 
-        # 1️⃣ nada selecionado → posição neutra
         if not selected_id:
-            index = 0
-        else:
-            item = next(
-                (i for i in layer.get("items", []) if i["id"] == selected_id),
-                None
-            )
+            continue
 
-            # 2️⃣ item não encontrado → neutro (defensivo)
-            if not item:
-                index = 0
-            else:
-                # 3️⃣ index vem SEMPRE do JSON (catálogo)
-                index = item["index"]
+        item = next(
+            (it for it in layer.get("items", []) if it["id"] == selected_id),
+            None
+        )
 
-        if base == 16:
-            value = format(index, f"0{chars}x")
-        else:
-            value = base36_encode(index, chars)
+        if not item:
+            continue
 
-        result.append(value)
+        index = item.get("index", 0)
+        config[build_order] = encode_index(index)
 
-    return "".join(result)
+    return "".join(config)
 
 
 # ======================================================
-# 🧩 STACK DE IMAGENS (CORE)
+# 🧩 STACK DE IMAGENS
 # ======================================================
 
-def stack_layers(
+def stack_layers_image_only(
     scene_id: str,
     layers: list,
     selection: dict,
     assets_root: Path,
-    config_string_base: int = 36,
-    build_chars: int = 2
-):
+) -> Image.Image:
     """
-    Empilha base + overlays da cena atual.
-    assets_root: raiz da cena (ex: assets/scenes/kitchen)
+    Empilha base + overlays.
+    Retorna APENAS a imagem PIL.
     """
-
     base_image_name = f"base_{scene_id}.jpg"
     base_path = assets_root / base_image_name
 
@@ -111,52 +153,40 @@ def stack_layers(
 
     missing_overlays = []
 
-    with Image.open(base_path).convert("RGBA") as base:
-        for layer in sorted(layers, key=lambda x: x.get("build_order", 0)):
-            layer_id = layer["id"]
-            item_id = selection.get(layer_id)
+    # Abre e mantém referência fora do with
+    base = Image.open(base_path).convert("RGBA")
 
-            item_id = selection.get(layer_id)
+    for layer in sorted(layers, key=lambda x: x.get("build_order", 0)):
+        layer_id = layer["id"]
+        item_id = selection.get(layer_id)
 
-            # 1️⃣ nada selecionado → ignora layer
-            if not item_id:
-                continue
+        if not item_id:
+            continue
 
-            item = next(
-                (i for i in layer.get("items", []) if i["id"] == item_id),
-                None
-            )
-
-            # 2️⃣ item inválido → ignora
-            if not item:
-                continue
-
-            # 3️⃣ regra vinda do JSON: file null = sem overlay
-            if item.get("file") is None:
-                continue
-
-            # 4️⃣ naming REAL do filesystem
-            file_name = f"{layer_id}_{item_id}.png"
-
-            overlay_path = assets_root / "layers" / layer_id / file_name
-
-            # 5️⃣ aqui sim é erro real
-            if not overlay_path.exists():
-                missing_overlays.append((layer_id, file_name))
-                continue
-
-            with Image.open(overlay_path).convert("RGBA") as overlay:
-                base.alpha_composite(overlay)
-
-        if missing_overlays:
-            raise RuntimeError(f"Overlays ausentes: {missing_overlays}")
-
-        build_string = build_string_from_selection(
-            layers,
-            selection,
-            base=36,
-            chars=2
+        item = next(
+            (it for it in layer.get("items", []) if it["id"] == item_id),
+            None
         )
 
-        logging.info(f"✅ Stack gerado em memória: {build_string}")
-        return base.convert("RGB"), build_string
+        if not item:
+            continue
+
+        if item.get("file") is None:
+            continue
+
+        file_name = f"{layer_id}_{item_id}.png"
+        overlay_path = assets_root / "layers" / layer_id / file_name
+
+        if not overlay_path.exists():
+            missing_overlays.append((layer_id, file_name))
+            continue
+
+        overlay = Image.open(overlay_path).convert("RGBA")
+        base.alpha_composite(overlay)
+        overlay.close()
+
+    if missing_overlays:
+        logging.warning(f"⚠️ Overlays ausentes (ignorados): {missing_overlays}")
+
+    logging.info(f"✅ Stack de imagem gerado: {base.size}")
+    return base.convert("RGB")

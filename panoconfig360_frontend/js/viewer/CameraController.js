@@ -1,9 +1,6 @@
 /**
- * cameraController.js
- * Controlador modular de câmera com:
- *  - Limite de pitch igual ao Marzipano
- *  - Limite de zoom (FOV)
- *  - Animação suave entre pontos de interesse
+ * CameraController.js
+ * Controlador de câmera com animação suave entre POIs
  */
 
 export const CAMERA_POIS = {
@@ -19,30 +16,21 @@ export function CreateCameraController(view) {
 
   let currentAnimation = null;
 
-  // ________________________________ CONSTANTES DE LIMITES
+  const PITCH_MIN = -Math.PI / 2 + 0.1;
+  const PITCH_MAX = Math.PI / 2 - 0.1;
+  const FOV_MIN = (30 * Math.PI) / 180;
+  const FOV_MAX = (100 * Math.PI) / 180;
 
-  const PITCH_MIN = -Math.PI / 2 + 0.1; // ≈ -85°
-  const PITCH_MAX = Math.PI / 2 - 0.1;  // ≈ +85°
-
-  const FOV_MIN = (30 * Math.PI) / 180; // 30°
-  const FOV_MAX = (100 * Math.PI) / 180; // 100°
-
-  // ____________________________ REFORÇAR LIMITES DO VIEW
-
-  // Intercepta o método de setPitch() e adiciona clamp
+  // Intercepta métodos do view para aplicar limites
   const originalSetPitch = view.setPitch.bind(view);
   view.setPitch = (pitch) => {
     originalSetPitch(clampPitch(pitch));
   };
 
-  // Intercepta o método de setFov() e adiciona clamp
   const originalSetFov = view.setFov.bind(view);
   view.setFov = (fov) => {
     originalSetFov(clampFov(fov));
   };
-
-
-  // ________________________________ UTILITÁRIOS
 
   function shortestAngleDifference(a, b) {
     let diff = b - a;
@@ -59,16 +47,12 @@ export function CreateCameraController(view) {
     return Math.min(Math.max(fov, FOV_MIN), FOV_MAX);
   }
 
-  // ________________________________ ANIMAÇÃO DE FOCO
-
   function focusOn(key) {
     const poi = CAMERA_POIS[key];
     if (!poi) {
-      console.warn(`[CameraController] Ponto "${key}" não encontrado.`);
+      console.warn(`[CameraController] POI "${key}" não encontrado.`);
       return;
     }
-
-    localStorage.setItem("pano-camera-poi", key);
 
     const startYaw = view.yaw();
     const startPitch = view.pitch();
@@ -101,15 +85,8 @@ export function CreateCameraController(view) {
     currentAnimation = requestAnimationFrame(animate);
   }
 
-  // ________________________________ FIXAR FOV / ZOOM
-
-  // Corrige o FOV inicial (se necessário)
+  // Corrige FOV inicial
   view.setFov(clampFov(view.fov()));
 
-
-  // ________________________________ API PÚBLICA
-
-  return {
-    focusOn,
-  };
+  return { focusOn };
 }

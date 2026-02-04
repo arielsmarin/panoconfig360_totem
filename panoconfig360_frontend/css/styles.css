@@ -374,3 +374,63 @@ section {
     font-size: 0.75rem;
   }
 }
+
+/* ======================================================
+ * SELETOR DE CENAS
+ * ====================================================== */
+
+.scene-selector {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.9);
+  padding: 30px;
+  border-radius: 12px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.scene-selector-title {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.scene-buttons {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.scene-button {
+  padding: 15px 30px;
+  background: linear-gradient(135deg, #333, #444);
+  color: #fff;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  min-width: 120px;
+}
+
+.scene-button:hover {
+  background: linear-gradient(135deg, #444, #555);
+  transform: translateY(-2px);
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+}
+
+.scene-button.active {
+  background: linear-gradient(135deg, #007bff, #0056b3);
+  border-color: #00aaff;
+  box-shadow: 0 0 15px rgba(0, 123, 255, 0.4);
+}
