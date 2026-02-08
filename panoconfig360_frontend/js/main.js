@@ -22,10 +22,23 @@ let renderService = null;
 let uiController = null;
 let sceneSelector = null;
 let render2DModal = null;
-let loading = false;
-let pendingReload = false;
+
 let renderDebounceTimer = null;
 let currentAbortController = null;
+
+// ======================================================
+// UTILITY FUNCTIONS
+// ======================================================
+function getBuildFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("build");
+}
+
+function updateUrl(build) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("build", build);
+  window.history.replaceState({}, "", url);
+}
 
 // ======================================================
 // INICIALIZAÇÃO
@@ -43,24 +56,31 @@ async function init() {
     // 2. Cria o configurator
     configurator = new Configurator(configLoader);
 
-    // ⚠️ SEMPRE inicializa padrão primeiro
-    configurator.initializeSelection();
+    // 3. Verifica se há build na URL
+    const buildFromUrl = getBuildFromUrl();
 
-    // 3. Inicializa o viewer
+    if (buildFromUrl) {
+      console.log("[Main] Restaurando build da URL:", buildFromUrl);
+      configurator.initializeFromBuild(buildFromUrl);
+    } else {
+      configurator.initializeSelection();
+    }
+
+    // 4. Inicializa o viewer
     const viewerConfig = configLoader.getViewerConfig();
     viewerManager = new ViewerManager(VIEWER_CONTAINER_ID, viewerConfig);
     await viewerManager.initialize();
 
-    // 4. Serviços
+    // 5. Serviços
     renderService = new RenderService();
     render2DModal = new Render2DModal();
 
-    // 5. Scene selector
+    // 6. Scene selector
     const scenes = configLoader.getSceneList();
     sceneSelector = new SceneSelector("scene-selector", handleSceneChange);
     sceneSelector.render(scenes, configurator.sceneId);
 
-    // 6. UI
+    // 7. UI
     uiController = new UIController(configurator, {
       onSelectionChange: handleSelectionChange,
       onFocusRequest: handleFocusRequest,
@@ -69,41 +89,13 @@ async function init() {
     });
     uiController.renderMainMenu();
 
-    // 7. Deep-link (AGORA é seguro)
-    const buildFromUrl = getBuildFromUrl();
-
-    if (buildFromUrl) {
-      console.log("[Main] Aplicando build da URL:", buildFromUrl);
-
-      const result = await renderService.renderCubemap(
-        configLoader.clientId,
-        configurator.sceneId,
-        configurator.currentSelection,
-      );
-
-      await viewerManager.loadScene(result.tiles);
-    } else {
-      // 🔴 carregar cena inicial padrão
-      console.log("[Main] Carregando cena inicial padrão");
-
-      await loadCurrentScene();
-    }
+    // 8. Carrega a cena inicial
+    await loadCurrentScene();
 
     console.log("[Main] Aplicação iniciada com sucesso!");
   } catch (error) {
     console.error("[Main] Erro na inicialização:", error);
   }
-}
-
-function updateUrl(build) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("build", build);
-  window.history.replaceState({}, "", url);
-}
-
-function getBuildFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("build");
 }
 
 // ======================================================

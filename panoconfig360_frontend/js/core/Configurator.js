@@ -30,50 +30,40 @@ export class Configurator extends EventEmitter {
   }
 
   initializeFromBuild(buildString) {
-  // proteção: projeto ainda não carregado
-  if (!this.project || !this.layers) {
-    console.warn("[Configurator] Projeto não pronto, usando seleção padrão");
-    this.initializeSelection();
-    return;
-  }
-
-  // proteção: build inválida
-  if (!buildString || typeof buildString !== "string") {
-    this.initializeSelection();
-    return;
-  }
-
-  const charsPerLayer = this.project.buildChars;
-  const base = this.project.configStringBase;
-
-  // valida tamanho mínimo
-  if (buildString.length !== this.layers.length * charsPerLayer) {
-    console.warn("[Configurator] Build inválida, usando padrão");
-    this.initializeSelection();
-    return;
-  }
-
-  this._currentSelection = {};
-
-  this.layers.forEach((layer, index) => {
-    const start = index * charsPerLayer;
-    const chunk = buildString.slice(start, start + charsPerLayer);
-
-    const itemIndex =
-      base === 16 ? parseInt(chunk, 16) : parseInt(chunk, 36);
-
-    const item = layer.items.find(i => i.index === itemIndex);
-
-    if (item) {
-      this._currentSelection[layer.id] = item.id;
+    // proteção: build inválida
+    if (!buildString || typeof buildString !== "string") {
+      this.initializeSelection();
+      return;
     }
-  });
 
-  this._buildString = buildString;
+    const charsPerLayer = this.project.buildChars;
+    const base = this.project.configStringBase;
 
-  this.emit("selectionChange", this._currentSelection);
-}
+    // valida tamanho mínimo
+    if (!buildString || buildString.length < charsPerLayer) {
+      this.initializeSelection();
+      return;
+    }
 
+    this._currentSelection = {};
+
+    this.layers.forEach((layer, index) => {
+      const start = index * charsPerLayer;
+      const chunk = buildString.slice(start, start + charsPerLayer);
+
+      const itemIndex = base === 16 ? parseInt(chunk, 16) : parseInt(chunk, 36);
+
+      const item = layer.items.find((i) => i.index === itemIndex);
+
+      if (item) {
+        this._currentSelection[layer.id] = item.id;
+      }
+    });
+
+    this._buildString = buildString;
+
+    this.emit("selectionChange", this._currentSelection);
+  }
 
   // Inicializa seleção com base em preset ou defaults
   initializeSelection(presetSelection = null) {
